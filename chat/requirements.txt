@@ -1,7 +1,7 @@
 fastapi
 uvicorn
-sqlalchemy
 pyjwt
+pymongo
 passlib[bcrypt]
 python-multipart
 websockets==11.0.3

@@ -1,30 +1,20 @@
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, DateTime
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
 import jwt
 from datetime import datetime
+from pymongo import MongoClient
 import json
+import os
 
 SECRET_KEY = "my_secret_distributed_key"
 ALGORITHM = "HS256"
-DATABASE_URL = "sqlite:///./messages.db" 
 
-Base = declarative_base()
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017/chat_database")
 
-class MessageDB(Base):
-    __tablename__ = "messages"
-    id = Column(Integer, primary_key=True, index=True)
-    sender = Column(String, index=True)
-    recipient = Column(String, index=True)
-    content = Column(String)
-    timestamp = Column(DateTime, default=datetime.utcnow)
-
-Base.metadata.create_all(bind=engine)
+client = MongoClient(MONGO_URL)
+db = client.get_database()
+messages_collection = db["messages"]
 
 app = FastAPI(title="Chat Service")
 
@@ -35,6 +25,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def format_message(message_doc) -> dict:
+    return {
+        "id": str(message_doc["_id"]),
+        "sender": message_doc["sender"],
+        "recipient": message_doc["recipient"],
+        "content": message_doc["content"],
+        "timestamp": message_doc["timestamp"].isoformat()
+    }
 
 class ConnectionManager:
     def __init__(self):
@@ -54,13 +53,6 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
 async def get_current_user(token: str = Query(...)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -72,7 +64,7 @@ async def get_current_user(token: str = Query(...)):
         raise HTTPException(status_code=401, detail="Could not validate credentials")
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, token: str = Query(...), db: Session = Depends(get_db)):
+async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     try:
         username = await get_current_user(token)
     except:
@@ -89,9 +81,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...), db: 
             content = message_data.get("msg")
             
             if recipient and content:
-                new_msg = MessageDB(sender=username, recipient=recipient, content=content)
-                db.add(new_msg)
-                db.commit()
+                new_msg = {
+                    "sender": username,
+                    "recipient": recipient,
+                    "content": content,
+                    "timestamp": datetime.utcnow()
+                }
+                messages_collection.insert_one(new_msg)
                 
                 response_payload = json.dumps({"from": username, "msg": content})
                 await manager.send_personal_message(response_payload, recipient)
@@ -105,15 +101,40 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...), db: 
         manager.disconnect(username)
 
 @app.get("/history/{other_user}")
-def get_history(other_user: str, token: str = Query(...), db: Session = Depends(get_db)):
+def get_history(other_user: str, token: str = Query(...)):
     current_user = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM]).get("sub")
     
-    messages = db.query(MessageDB).filter(
-        ((MessageDB.sender == current_user) & (MessageDB.recipient == other_user)) |
-        ((MessageDB.sender == other_user) & (MessageDB.recipient == current_user))
-    ).order_by(MessageDB.timestamp).all()
+    query = {
+        "$or": [
+            {"sender": current_user, "recipient": other_user},
+            {"sender": other_user, "recipient": current_user}
+        ]
+    }
+    
+    cursor = messages_collection.find(query).sort("timestamp", 1)
+    
+    messages = [format_message(msg) for msg in cursor]
     
     return messages
+
+@app.get("/contacts")
+def get_contacts(token: str = Query(...)):
+    try:
+        current_user = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM]).get("sub")
+        
+        sent_to = messages_collection.distinct("recipient", {"sender": current_user})
+        
+        received_from = messages_collection.distinct("sender", {"recipient": current_user})
+        
+        all_contacts = list(set(sent_to + received_from))
+        
+        if current_user in all_contacts:
+            all_contacts.remove(current_user)
+            
+        return all_contacts
+    except Exception as e:
+        print(f"Contacts Error: {e}")
+        return []
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8001)

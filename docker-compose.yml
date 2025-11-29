@@ -1,13 +1,23 @@
 version: '3.8'
 
 services:
+  mongo-db:
+    image: mongo:latest
+    container_name: chat_mongodb
+    ports:
+      - "27017:27017" 
+    volumes:
+      - mongo_data:/data/db 
+    networks:
+      - chat-net
+
   auth-service:
     build: ./auth
     container_name: auth_service
     ports:
       - "8000:8000"
     volumes:
-      - ./auth_data:/users_db
+      - ./users.db:/app/users.db
     networks:
       - chat-net
 
@@ -20,6 +30,8 @@ services:
       - auth-service
     networks:
       - chat-net
+    environment:
+      - MONGO_URL=mongodb://mongo-db:27017/chat_database
 
   frontend:
     build: ./frontend
@@ -31,6 +43,9 @@ services:
       - chat-service
     networks:
       - chat-net
+
+volumes:
+  mongo_data:
 
 networks:
   chat-net:
