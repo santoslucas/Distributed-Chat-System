@@ -44,6 +44,23 @@ services:
     networks:
       - chat-net
 
+  tester:
+    image: python:3.9-slim
+    container_name: test_runner
+    working_dir: /project
+    volumes:
+      - .:/project 
+    command: tail -f /dev/null
+    environment:
+      - AUTH_URL=http://auth-service:8000
+      - CHAT_URL=ws://chat-service:8001
+      - MONGO_URL=mongodb://mongo-db:27017/chat_database
+    depends_on:
+      - auth-service
+      - chat-service
+    networks:
+      - chat-net
+
 volumes:
   mongo_data:
 
